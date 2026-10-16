@@ -487,6 +487,11 @@ impl AppleAccount {
             .context("Failed to request SMS 2FA")?;
 
         let mut status = res.status();
+        let mut report = vec![format!(
+            "client info: {} | {}",
+            self.grandslam_client.client_info.client_info, self.grandslam_client.client_info.user_agent
+        )];
+        report.push(format!("PUT verify/phone: {}", Self::describe_response(&res)));
         let mut text = if status.is_success() {
             String::new()
         } else {
@@ -494,6 +499,9 @@ impl AppleAccount {
                 .await
                 .context("Failed to read SMS 2FA response text")?
         };
+        if !status.is_success() {
+            report.push(format!("  body: {}", Self::snippet(&text)));
+        }
 
         // Apple now answers the PUT with a bare 403 for some accounts. A GET of the secondaryAuth URL without the
         // JSON content headers (what SideInstaller does) still sends the code to the account's default number.
@@ -508,12 +516,17 @@ impl AppleAccount {
                 .await
                 .context("Failed to request SMS 2FA through secondaryAuth")?;
             status = res.status();
+            report.push(format!("GET secondaryAuth: {}", Self::describe_response(&res)));
             text = res
                 .text()
                 .await
                 .context("Failed to read SMS 2FA response text")?;
             if status.is_success() {
                 text = String::new();
+            } else {
+                report.push(format!("  body: {}", Self::snippet(&text)));
+                self.sms_403_probes(&anisette_data, id, &mut report).await;
+                bail!("SMS 2FA diagnostics (send this to whoever debugs it):\n{}", report.join("\n"));
             }
         }
 
@@ -740,6 +753,67 @@ impl AppleAccount {
             return Ok(LoginState::NeedsSMS2FA(number.id));
         }
         bail!("Selected trusted number ID not found in trusted numbers");
+    }
+
+    fn describe_response(res: &reqwest::Response) -> String {
+        let headers: Vec<String> = res
+            .headers()
+            .iter()
+            .filter(|(k, _)| {
+                let k = k.as_str();
+                k.starts_with("x-apple") && !k.contains("token") && !k.contains("session") || k == "content-type" || k == "location"
+            })
+            .map(|(k, v)| format!("{}={}", k, v.to_str().unwrap_or("?")))
+            .collect();
+        format!("HTTP {} [{}]", res.status().as_u16(), headers.join(", "))
+    }
+
+    fn snippet(text: &str) -> String {
+        let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        t.chars().take(300).collect()
+    }
+
+    /// Variants of the SMS request, tried once each after both usual ways got 403, so the report shows what Apple accepts.
+    async fn sms_403_probes(&self, anisette_data: &AnisetteData, id: u32, report: &mut Vec<String>) {
+        let Ok(auth_headers) = self.build_2fa_headers(anisette_data).await else {
+            report.push("probes: could not build 2FA headers".into());
+            return;
+        };
+        let info = &self.grandslam_client.client_info;
+        let client = &self.grandslam_client.client;
+        let secondary = self.grandslam_client.get_url("secondaryAuth").unwrap_or_default();
+        let trusted = self.grandslam_client.get_url("trustedDeviceSecondaryAuth").unwrap_or_default();
+
+        // SideInstaller's exact headers: Xcode 14.2, no Connection: close.
+        let mut si = HeaderMap::new();
+        si.insert("X-Mme-Client-Info", reqwest::header::HeaderValue::from_str(&info.client_info).unwrap());
+        si.insert("User-Agent", reqwest::header::HeaderValue::from_str(&info.user_agent).unwrap());
+        si.insert("X-Xcode-Version", reqwest::header::HeaderValue::from_static("14.2 (14C18)"));
+        si.insert("X-Apple-App-Info", reqwest::header::HeaderValue::from_static("com.apple.gs.xcode.auth"));
+        si.extend(auth_headers.clone());
+
+        let body = serde_json::json!({ "phoneNumber": { "id": id }, "mode": "sms" }).to_string();
+        let mut web = si.clone();
+        web.insert("Content-Type", reqwest::header::HeaderValue::from_static("application/json"));
+        web.insert("Accept", reqwest::header::HeaderValue::from_static("application/json, text/javascript, */*; q=0.01"));
+
+        let probes: Vec<(&str, reqwest_middleware::RequestBuilder)> = vec![
+            ("GET secondaryAuth, SideInstaller headers", client.get(&secondary).headers(si.clone())),
+            ("PUT verify/phone, SideInstaller headers", client.put("https://gsa.apple.com/auth/verify/phone").headers(web.clone()).body(body.clone())),
+            ("GET verify/phone", client.get("https://gsa.apple.com/auth/verify/phone").headers(web)),
+            ("GET trustedDeviceSecondaryAuth", client.get(&trusted).headers(si)),
+        ];
+        for (name, req) in probes {
+            match req.send().await {
+                Ok(res) => {
+                    let line = format!("{}: {}", name, Self::describe_response(&res));
+                    let text = res.text().await.unwrap_or_default();
+                    report.push(line);
+                    report.push(format!("  body: {}", Self::snippet(&text)));
+                }
+                Err(e) => report.push(format!("{}: send failed: {}", name, e)),
+            }
+        }
     }
 
     async fn build_2fa_headers(&self, anisette_data: &AnisetteData) -> Result<HeaderMap, Report> {
