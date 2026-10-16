@@ -1,4 +1,6 @@
 pub mod remote_v3;
+#[cfg(target_os = "macos")]
+pub mod macos_local;
 
 use crate::auth::grandslam::GrandSlam;
 use plist::Dictionary;

@@ -1597,6 +1597,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "cbc 0.2.1",
+ "cc",
  "futures",
  "futures-util",
  "getrandom 0.2.17",

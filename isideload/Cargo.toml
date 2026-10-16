@@ -65,6 +65,9 @@ x509-cert = "0.2.5"
 apple-codesign-quick = "0.1.0"
 
 
+[build-dependencies]
+cc = "1"
+
 # There is a bug in rustls-platform-verifier that causes an invalid certificate error with apple's root cert.
 # It has been fixed already but I am waiting for a new release before I can update the dependency.
 # Using native-tls avoids the issue.
