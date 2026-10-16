@@ -106,6 +106,16 @@ impl GrandSlam {
         Ok(builder)
     }
 
+    /// A GET with none of the content headers, the way SideInstaller asks for the SMS code from `secondaryAuth`.
+    pub fn get_bare(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+        let mut headers = Self::base_headers(&self.client_info, false)?;
+        headers.remove("Content-Type");
+        headers.remove("Accept");
+        let builder = self.client.get(url).headers(headers);
+
+        Ok(builder)
+    }
+
     pub fn put_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
         let builder = self
             .client

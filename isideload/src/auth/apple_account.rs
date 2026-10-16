@@ -486,14 +486,36 @@ impl AppleAccount {
             .await
             .context("Failed to request SMS 2FA")?;
 
-        let status = res.status();
-        let text = if status.is_success() {
+        let mut status = res.status();
+        let mut text = if status.is_success() {
             String::new()
         } else {
             res.text()
                 .await
                 .context("Failed to read SMS 2FA response text")?
         };
+
+        // Apple now answers the PUT with a bare 403 for some accounts. A GET of the secondaryAuth URL without the
+        // JSON content headers (what SideInstaller does) still sends the code to the account's default number.
+        if status == reqwest::StatusCode::FORBIDDEN && Self::parse_sms_service_error(&text).is_none() {
+            warn!("SMS 2FA request got a bare 403, asking through secondaryAuth instead");
+            let request_code_url = self.grandslam_client.get_url("secondaryAuth")?;
+            let res = self
+                .grandslam_client
+                .get_bare(&request_code_url)?
+                .headers(self.build_2fa_headers(&anisette_data).await?)
+                .send()
+                .await
+                .context("Failed to request SMS 2FA through secondaryAuth")?;
+            status = res.status();
+            text = res
+                .text()
+                .await
+                .context("Failed to read SMS 2FA response text")?;
+            if status.is_success() {
+                text = String::new();
+            }
+        }
 
         match Self::classify_sms_send_response(status.as_u16(), &text, id)? {
             SmsSendOutcome::Sent => {
